@@ -458,15 +458,20 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
             int partition = partition(record, serializedKey, serializedValue, metadata.fetch());
             int serializedSize = Records.LOG_OVERHEAD + Record.recordSize(serializedKey, serializedValue);
+            // 消息发送到缓存区之前做的检查
             ensureValidRecordSize(serializedSize);
+            // 准备好当前消息要发往的目标Topic与Partition信息，封装成一个TopicPartition对象
             tp = new TopicPartition(record.topic(), partition);
             long timestamp = record.timestamp() == null ? time.milliseconds() : record.timestamp();
             log.trace("Sending record {} with callback {} to topic {} partition {}", record, callback, record.topic(), partition);
             // producer callback will make sure to call both 'callback' and interceptor callback
             Callback interceptCallback = this.interceptors == null ? callback : new InterceptorCallback<>(callback, this.interceptors, tp);
+            // 再准备好时间戳、回调函数，然后同消息key、消息value，topic与分区信息等一起打包追加到缓冲区RecordAccumulator组件中去
+            // 时间戳主要用来判断这个消息是否等待发送超时过期
             RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey, serializedValue, interceptCallback, remainingWaitMs);
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
+                // 如果一个batch满了或者新的batch已经创建了，就立即唤醒IO线程把数据发送出去
                 this.sender.wakeup();
             }
             return result.future;
@@ -540,11 +545,13 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      * Validate that the record size isn't too large
      */
     private void ensureValidRecordSize(int size) {
+        // 不能超过请求大小（1mb）
         if (size > this.maxRequestSize)
             throw new RecordTooLargeException("The message is " + size +
                                               " bytes when serialized which is larger than the maximum request size you have configured with the " +
                                               ProducerConfig.MAX_REQUEST_SIZE_CONFIG +
                                               " configuration.");
+        // 也不能超过内存缓冲大小（32mb）
         if (size > this.totalMemorySize)
             throw new RecordTooLargeException("The message is " + size +
                                               " bytes when serialized which is larger than the total memory buffer you have configured with the " +
@@ -710,6 +717,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     private int partition(ProducerRecord<K, V> record, byte[] serializedKey , byte[] serializedValue, Cluster cluster) {
         Integer partition = record.partition();
         if (partition != null) {
+            // cluster.partitionsForTopic(record.topic()) 这个方法里面会检查，如果当前元数据中没有目标partition信息，就先发起一个NIO通信去Broker上抓取最新的元数据信息过来，且是同步等到结果到来的，最多等待60秒超时
             List<PartitionInfo> partitions = cluster.partitionsForTopic(record.topic());
             int lastPartition = partitions.size() - 1;
             // they have given us a partition, use it
@@ -718,6 +726,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
             return partition;
         }
+        // 如果走partitioner组件来获取目标分区，里面也会有执行cluster.partitionsForTopic(record.topic())这个代码
         return this.partitioner.partition(record.topic(), record.key(), serializedKey, record.value(), serializedValue,
             cluster);
     }

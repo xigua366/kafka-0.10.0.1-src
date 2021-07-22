@@ -166,10 +166,12 @@ public final class RecordAccumulator {
         appendsInProgress.incrementAndGet();
         try {
             // check if we have an in-progress batch
+            // 拿到或新建一个目标topic的分区对应的双向队列
             Deque<RecordBatch> dq = getOrCreateDeque(tp);
             synchronized (dq) {
                 if (closed)
                     throw new IllegalStateException("Cannot send after the producer is closed.");
+                // tryAppend 方法中，开始尝试将本地要发送的消息打包放入到对应的Deque队列中去
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, callback, dq);
                 if (appendResult != null)
                     return appendResult;
@@ -178,6 +180,8 @@ public final class RecordAccumulator {
             // we don't have an in-progress record batch try to allocate a new batch
             int size = Math.max(this.batchSize, Records.LOG_OVERHEAD + Record.recordSize(key, value));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+
+            // free.allocate()的作用是，如果此时Duque队列是空的，这里就会开辟一块可复用的内存空间出来 FIXME 这里还不是很明白
             ByteBuffer buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
@@ -190,6 +194,8 @@ public final class RecordAccumulator {
                     free.deallocate(buffer);
                     return appendResult;
                 }
+
+                // 如果Duque队列是空的，会走到下面的代码逻辑来
                 MemoryRecords records = MemoryRecords.emptyRecords(buffer, compression, this.batchSize);
                 RecordBatch batch = new RecordBatch(tp, records, time.milliseconds());
                 FutureRecordMetadata future = Utils.notNull(batch.tryAppend(timestamp, key, value, callback, time.milliseconds()));
@@ -208,14 +214,20 @@ public final class RecordAccumulator {
      * resources (like compression streams buffers).
      */
     private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Callback callback, Deque<RecordBatch> deque) {
+        // java.util.ArrayDeque.peekLast() 此方法检索但不删除此双端队列的最后一个元素，如果此双端队列为空，则返回null。
+        // 注意这里从队列中返回的是一个RecordBatch对象，而不是具体的消息对象。
+        // 因为其实kafka是将很多发往相同topic与partition的消息合并打包成一个RecordBatch对象之后才放入到Deque队列中去的。
+        // 所以最后通过NIO网络通信组件发送出去的消息报文也是以一个RecordBatch对象为最小单位的
         RecordBatch last = deque.peekLast();
         if (last != null) {
+            // 如果Deque队列不是空的，则把当前消息合并到队列中最后的那个RecordBatch对象中
             FutureRecordMetadata future = last.tryAppend(timestamp, key, value, callback, time.milliseconds());
             if (future == null)
                 last.records.close();
             else
                 return new RecordAppendResult(future, deque.size() > 1 || last.records.isFull(), false);
         }
+        // 如果Deque队列还是空的，则不作处理，直接返回null
         return null;
     }
 

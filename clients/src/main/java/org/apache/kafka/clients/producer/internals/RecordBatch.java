@@ -67,9 +67,13 @@ public final class RecordBatch {
         if (!this.records.hasRoomFor(key, value)) {
             return null;
         } else {
+            // this.records.append() 里面会追加消息到RecordBatch对象中
             long checksum = this.records.append(offsetCounter++, timestamp, key, value);
             this.maxRecordSize = Math.max(this.maxRecordSize, Record.recordSize(key, value));
             this.lastAppendTime = now;
+            // 构建FutureRecordMetadata对象时，还是把原来的this.produceFuture作为参数传入进去
+            // 说明同一个RecordBatch中的消息时共用一个Future对象的
+            // 因为这一批消息时同时一并通过网络发送出去的，肯定要么都成功，要么都失败
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
                                                                    timestamp, checksum,
                                                                    key == null ? -1 : key.length,

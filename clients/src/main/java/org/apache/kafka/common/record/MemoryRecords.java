@@ -97,6 +97,7 @@ public class MemoryRecords implements Records {
         int size = Record.recordSize(key, value);
         compressor.putLong(offset);
         compressor.putInt(size);
+        // 按kafka指定的格式压缩消息数据
         long crc = compressor.putRecord(timestamp, key, value);
         compressor.recordWritten(size + Records.LOG_OVERHEAD);
         return crc;
